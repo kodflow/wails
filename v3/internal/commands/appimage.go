@@ -187,9 +187,17 @@ func generateAppImage(options *GenerateAppImageOptions) error {
 
 	// Run linuxdeploy to bundle the application
 	s.CD(options.BuildDir)
-	linuxdeployAppImage := filepath.Join(options.BuildDir, "linuxdeploy-"+arch+".AppImage")
-	cmd := fmt.Sprintf("./%s --appimage-extract-and-run --appdir %s --output appimage --plugin gtk", linuxdeployAppImage, appDir)
+	var linuxdeployAppImage string
+	if arch == "arm64" {
+		linuxdeployAppImage = "linuxdeploy-aarch64.AppImage"
+	} else {
+		linuxdeployAppImage = "linuxdeploy-x86_64.AppImage"
+	}
+
+	cmd := fmt.Sprintf("%s --appimage-extract-and-run --appdir %s --output appimage --plugin gtk", filepath.Join(options.BuildDir, linuxdeployAppImage), appDir)
 	s.SETENV("DEPLOY_GTK_VERSION", DeployGtkVersion)
+	fmt.Println("Running: " + cmd)
+	fmt.Println("DEPLOY_GTK_VERSION", DeployGtkVersion)
 	output, err := s.EXEC(cmd)
 	if err != nil {
 		println(output)
@@ -197,7 +205,13 @@ func generateAppImage(options *GenerateAppImageOptions) error {
 	}
 
 	// Move file to output directory
-	targetFile := filepath.Join(options.BuildDir, name+"-"+arch+".AppImage")
+	var targetFile string
+	if arch == "arm64" {
+		targetFile = filepath.Join(options.BuildDir, name+"-aarch64.AppImage")
+	} else {
+		targetFile = filepath.Join(options.BuildDir, name+"-x86_64.AppImage")
+	}
+
 	s.MOVE(targetFile, options.OutputDir)
 
 	log(p, "AppImage created: "+targetFile)
