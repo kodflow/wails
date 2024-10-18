@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -72,7 +73,14 @@ func generateAppImage(options *GenerateAppImageOptions) error {
 	// Get the last path of the binary and normalise the name
 	name := normaliseName(filepath.Base(options.Binary))
 
-	appDir := filepath.Join(options.BuildDir, name+"-x86_64.AppDir")
+	// Detect system architecture
+	arch := runtime.GOARCH
+	var appDir string
+	if arch == "arm64" {
+		appDir = filepath.Join(options.BuildDir, name+"-arm64.AppDir")
+	} else {
+		appDir = filepath.Join(options.BuildDir, name+"-x86_64.AppDir")
+	}
 	s.RMDIR(appDir)
 
 	log(p, "Preparing AppImage Directory: "+appDir)
@@ -96,21 +104,38 @@ func generateAppImage(options *GenerateAppImageOptions) error {
 	log(p, "Downloading AppImage tooling")
 	var wg sync.WaitGroup
 	wg.Add(2)
+
 	go func() {
-		if !s.EXISTS(filepath.Join(options.BuildDir, "linuxdeploy-x86_64.AppImage")) {
-			s.DOWNLOAD("https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage", filepath.Join(options.BuildDir, "linuxdeploy-x86_64.AppImage"))
+		var linuxdeployURL string
+		if arch == "arm64" {
+			linuxdeployURL = "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-aarch64.AppImage"
+		} else {
+			linuxdeployURL = "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
 		}
-		s.CHMOD(filepath.Join(options.BuildDir, "linuxdeploy-x86_64.AppImage"), 0755)
+
+		if !s.EXISTS(filepath.Join(options.BuildDir, filepath.Base(linuxdeployURL))) {
+			s.DOWNLOAD(linuxdeployURL, filepath.Join(options.BuildDir, filepath.Base(linuxdeployURL)))
+		}
+		s.CHMOD(filepath.Join(options.BuildDir, filepath.Base(linuxdeployURL)), 0755)
 		wg.Done()
 	}()
+
 	go func() {
+		var appRunURL string
+		if arch == "arm64" {
+			appRunURL = "https://github.com/AppImage/AppImageKit/releases/download/continuous/AppRun-aarch64"
+		} else {
+			appRunURL = "https://github.com/AppImage/AppImageKit/releases/download/continuous/AppRun-x86_64"
+		}
+
 		target := filepath.Join(appDir, "AppRun")
 		if !s.EXISTS(target) {
-			s.DOWNLOAD("https://github.com/AppImage/AppImageKit/releases/download/continuous/AppRun-x86_64", target)
+			s.DOWNLOAD(appRunURL, target)
 		}
 		s.CHMOD(target, 0755)
 		wg.Done()
 	}()
+
 	wg.Wait()
 
 	log(p, "Processing GTK files.")
@@ -134,6 +159,7 @@ func generateAppImage(options *GenerateAppImageOptions) error {
 		s.MKDIR(targetDir)
 		s.COPY(file, targetDir)
 	}
+
 	// Copy GTK Plugin
 	err = os.WriteFile(filepath.Join(options.BuildDir, "linuxdeploy-plugin-gtk.sh"), gtkPlugin, 0755)
 	if err != nil {
@@ -141,7 +167,6 @@ func generateAppImage(options *GenerateAppImageOptions) error {
 	}
 
 	// Determine GTK Version
-	// Run ldd on the binary and capture the output
 	targetBinary := filepath.Join(appDir, "usr", "bin", options.Binary)
 	lddOutput, err := s.EXEC(fmt.Sprintf("ldd %s", targetBinary))
 	if err != nil {
@@ -149,7 +174,6 @@ func generateAppImage(options *GenerateAppImageOptions) error {
 		return err
 	}
 	lddString := string(lddOutput)
-	// Check if GTK3 is present
 	var DeployGtkVersion string
 	if s.CONTAINS(lddString, "libgtk-x11-2.0.so") {
 		DeployGtkVersion = "2"
@@ -160,10 +184,11 @@ func generateAppImage(options *GenerateAppImageOptions) error {
 	} else {
 		return fmt.Errorf("unable to determine GTK version")
 	}
+
 	// Run linuxdeploy to bundle the application
 	s.CD(options.BuildDir)
-	//log(p, "Generating AppImage (This may take a while...)")
-	cmd := fmt.Sprintf("./linuxdeploy-x86_64.AppImage --appimage-extract-and-run --appdir %s --output appimage --plugin gtk", appDir)
+	linuxdeployAppImage := filepath.Join(options.BuildDir, "linuxdeploy-"+arch+".AppImage")
+	cmd := fmt.Sprintf("./%s --appimage-extract-and-run --appdir %s --output appimage --plugin gtk", linuxdeployAppImage, appDir)
 	s.SETENV("DEPLOY_GTK_VERSION", DeployGtkVersion)
 	output, err := s.EXEC(cmd)
 	if err != nil {
@@ -172,7 +197,7 @@ func generateAppImage(options *GenerateAppImageOptions) error {
 	}
 
 	// Move file to output directory
-	targetFile := filepath.Join(options.BuildDir, name+"-x86_64.AppImage")
+	targetFile := filepath.Join(options.BuildDir, name+"-"+arch+".AppImage")
 	s.MOVE(targetFile, options.OutputDir)
 
 	log(p, "AppImage created: "+targetFile)
