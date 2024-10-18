@@ -73,14 +73,18 @@ func generateAppImage(options *GenerateAppImageOptions) error {
 	// Get the last path of the binary and normalise the name
 	name := normaliseName(filepath.Base(options.Binary))
 
-	// Detect system architecture
-	arch := runtime.GOARCH
-	var appDir string
-	if arch == "arm64" {
-		appDir = filepath.Join(options.BuildDir, name+"-arm64.AppDir")
-	} else {
-		appDir = filepath.Join(options.BuildDir, name+"-x86_64.AppDir")
+	// Architecture-specific variables using a map
+	archDetails := map[string]string{
+		"arm64":  "aarch64",
+		"x86_64": "x86_64",
 	}
+
+	arch, exists := archDetails[runtime.GOARCH]
+	if !exists {
+		return fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
+	}
+
+	appDir := filepath.Join(options.BuildDir, fmt.Sprintf("%s-%s.AppDir", name, arch))
 	s.RMDIR(appDir)
 
 	log(p, "Preparing AppImage Directory: "+appDir)
@@ -100,37 +104,30 @@ func generateAppImage(options *GenerateAppImageOptions) error {
 	// Download linuxdeploy and make it executable
 	s.CD(options.BuildDir)
 
-	// Download necessary files
+	// Download URLs using a map based on architecture
+	urls := map[string]string{
+		"linuxdeploy": fmt.Sprintf("https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-%s.AppImage", arch),
+		"AppRun":      fmt.Sprintf("https://github.com/AppImage/AppImageKit/releases/download/continuous/AppRun-%s", arch),
+	}
+
+	// Download necessary files concurrently
 	log(p, "Downloading AppImage tooling")
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	go func() {
-		var linuxdeployURL string
-		if arch == "arm64" {
-			linuxdeployURL = "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-aarch64.AppImage"
-		} else {
-			linuxdeployURL = "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+		linuxdeployPath := filepath.Join(options.BuildDir, filepath.Base(urls["linuxdeploy"]))
+		if !s.EXISTS(linuxdeployPath) {
+			s.DOWNLOAD(urls["linuxdeploy"], linuxdeployPath)
 		}
-
-		if !s.EXISTS(filepath.Join(options.BuildDir, filepath.Base(linuxdeployURL))) {
-			s.DOWNLOAD(linuxdeployURL, filepath.Join(options.BuildDir, filepath.Base(linuxdeployURL)))
-		}
-		s.CHMOD(filepath.Join(options.BuildDir, filepath.Base(linuxdeployURL)), 0755)
+		s.CHMOD(linuxdeployPath, 0755)
 		wg.Done()
 	}()
 
 	go func() {
-		var appRunURL string
-		if arch == "arm64" {
-			appRunURL = "https://github.com/AppImage/AppImageKit/releases/download/continuous/AppRun-aarch64"
-		} else {
-			appRunURL = "https://github.com/AppImage/AppImageKit/releases/download/continuous/AppRun-x86_64"
-		}
-
 		target := filepath.Join(appDir, "AppRun")
 		if !s.EXISTS(target) {
-			s.DOWNLOAD(appRunURL, target)
+			s.DOWNLOAD(urls["AppRun"], target)
 		}
 		s.CHMOD(target, 0755)
 		wg.Done()
@@ -138,6 +135,7 @@ func generateAppImage(options *GenerateAppImageOptions) error {
 
 	wg.Wait()
 
+	// Processing GTK files
 	log(p, "Processing GTK files.")
 	filesNeeded := []string{"WebKitWebProcess", "WebKitNetworkProcess", "libwebkit2gtkinjectedbundle.so"}
 	files, err := findGTKFiles(filesNeeded)
@@ -147,11 +145,9 @@ func generateAppImage(options *GenerateAppImageOptions) error {
 	s.CD(appDir)
 	for _, file := range files {
 		targetDir := filepath.Dir(file)
-		// Strip leading forward slash
 		if targetDir[0] == '/' {
 			targetDir = targetDir[1:]
 		}
-		var err error
 		targetDir, err = filepath.Abs(targetDir)
 		if err != nil {
 			return err
@@ -175,29 +171,23 @@ func generateAppImage(options *GenerateAppImageOptions) error {
 	}
 	lddString := string(lddOutput)
 	var DeployGtkVersion string
-	if s.CONTAINS(lddString, "libgtk-x11-2.0.so") {
+	switch {
+	case s.CONTAINS(lddString, "libgtk-x11-2.0.so"):
 		DeployGtkVersion = "2"
-	} else if s.CONTAINS(lddString, "libgtk-3.so") {
+	case s.CONTAINS(lddString, "libgtk-3.so"):
 		DeployGtkVersion = "3"
-	} else if s.CONTAINS(lddString, "libgtk-4.so") {
+	case s.CONTAINS(lddString, "libgtk-4.so"):
 		DeployGtkVersion = "4"
-	} else {
+	default:
 		return fmt.Errorf("unable to determine GTK version")
 	}
 
 	// Run linuxdeploy to bundle the application
 	s.CD(options.BuildDir)
-	var linuxdeployAppImage string
-	if arch == "arm64" {
-		linuxdeployAppImage = "linuxdeploy-aarch64.AppImage"
-	} else {
-		linuxdeployAppImage = "linuxdeploy-x86_64.AppImage"
-	}
+	linuxdeployAppImage := filepath.Join(options.BuildDir, fmt.Sprintf("linuxdeploy-%s.AppImage", arch))
 
-	cmd := fmt.Sprintf("%s --appimage-extract-and-run --appdir %s --output appimage --plugin gtk", filepath.Join(options.BuildDir, linuxdeployAppImage), appDir)
+	cmd := fmt.Sprintf("%s --appimage-extract-and-run --appdir %s --output appimage --plugin gtk", linuxdeployAppImage, appDir)
 	s.SETENV("DEPLOY_GTK_VERSION", DeployGtkVersion)
-	fmt.Println("Running: " + cmd)
-	fmt.Println("DEPLOY_GTK_VERSION", DeployGtkVersion)
 	output, err := s.EXEC(cmd)
 	if err != nil {
 		println(output)
@@ -205,13 +195,7 @@ func generateAppImage(options *GenerateAppImageOptions) error {
 	}
 
 	// Move file to output directory
-	var targetFile string
-	if arch == "arm64" {
-		targetFile = filepath.Join(options.BuildDir, name+"-aarch64.AppImage")
-	} else {
-		targetFile = filepath.Join(options.BuildDir, name+"-x86_64.AppImage")
-	}
-
+	targetFile := filepath.Join(options.BuildDir, fmt.Sprintf("%s-%s.AppImage", name, arch))
 	s.MOVE(targetFile, options.OutputDir)
 
 	log(p, "AppImage created: "+targetFile)
